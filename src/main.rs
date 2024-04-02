@@ -11,7 +11,7 @@ use reqwest::{
     header::{HeaderMap, ACCEPT, CACHE_CONTROL, CONTENT_TYPE},
     Client, Response, StatusCode,
 };
-use std::env;
+use std::{env, fs::File, io::Read};
 use url::Url;
 
 const PKG_NAME: &str = env!("CARGO_PKG_NAME");
@@ -90,7 +90,7 @@ impl ClientSession {
         headers.insert(CONTENT_TYPE, ODOH_HTTP_HEADER.parse()?);
         headers.insert(ACCEPT, ODOH_HTTP_HEADER.parse()?);
         headers.insert(CACHE_CONTROL, "no-cache, no-store".parse()?);
-        let query = [
+        let _query = [
             (
                 "targethost",
                 self.target
@@ -99,11 +99,19 @@ impl ClientSession {
             ),
             ("targetpath", QUERY_PATH),
         ];
-        let builder = if let Some(p) = &self.proxy {
-            self.client.post(p.clone()).headers(headers).query(&query)
-        } else {
+        let proxy = reqwest::Proxy::https("http://localhost:8080")?;
+        let mut buf = Vec::new();
+        File::open("../third-wheel/ca/ca_certs/cert.pem")?.read_to_end(&mut buf)?;
+        let cert = reqwest::Certificate::from_pem(&buf)?;
+        self.client = reqwest::Client::builder()
+            .add_root_certificate(cert)
+            .proxy(proxy)
+            .danger_accept_invalid_certs(true)
+            .build()?;
+        let builder = {
             self.client.post(self.target.clone()).headers(headers)
         };
+        println!("R: {:?}", request);
         let resp = builder.body(request.to_vec()).send().await?;
         Ok(resp)
     }
