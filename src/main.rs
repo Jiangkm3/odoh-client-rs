@@ -11,8 +11,9 @@ use reqwest::{
     header::{HeaderMap, ACCEPT, CACHE_CONTROL, CONTENT_TYPE},
     Client, Response, StatusCode,
 };
-use std::{env, fs::File, io::Read};
+use std::{convert::TryInto, env, fs::File, io::Read};
 use url::Url;
+const NUM_PROXIES: usize = 1;
 
 const PKG_NAME: &str = env!("CARGO_PKG_NAME");
 const PKG_AUTHORS: &str = env!("CARGO_PKG_AUTHORS");
@@ -66,14 +67,15 @@ impl ClientSession {
     }
 
     /// Create an oblivious query from a domain and query type
-    pub fn create_request(&mut self, domain: &str, qtype: &str) -> Result<Vec<u8>> {
+    pub fn create_request(&mut self, domain: &str, qtype: &str, pk_list: Vec<&ObliviousDoHConfigContents>) -> Result<Vec<u8>> {
         // create a DNS message
         let dns_msg = create_dns_query(domain, qtype)?;
         let query = ObliviousDoHMessagePlaintext::new(&dns_msg, 1);
         self.query = Some(query.clone());
         let mut rng = StdRng::from_entropy();
-        let (oblivious_query, client_secret) = encrypt_query(&query, &self.target_config, &mut rng)
+        let (oblivious_query, client_secret) = encrypt_query(&query, &self.target_config, pk_list, &mut rng)
             .context("failed to encrypt query")?;
+
         let query_body = compose(&oblivious_query)
             .context("failed to compose query body")?
             .freeze();
@@ -139,6 +141,10 @@ impl ClientSession {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let mut rng_list: Vec<StdRng> = (0..NUM_PROXIES).map(|i| StdRng::seed_from_u64(i.try_into().unwrap())).collect();
+    let keypair_list: Vec<ObliviousDoHKeyPair> = rng_list.iter_mut().map(|r| ObliviousDoHKeyPair::new(r)).collect();
+    let pk_list: Vec<&ObliviousDoHConfigContents> = keypair_list.iter().map(|i| i.public()).collect();
+
     let matches = App::new(PKG_NAME)
         .version(PKG_VERSION)
         .author(PKG_AUTHORS)
@@ -172,7 +178,7 @@ async fn main() -> Result<()> {
     let domain = matches.value_of("domain").unwrap();
     let qtype = matches.value_of("type").unwrap();
     let mut session = ClientSession::new(config.clone()).await?;
-    let request = session.create_request(domain, qtype)?;
+    let request = session.create_request(domain, qtype, pk_list)?;
     let response = session.send_request(&request).await?;
     session.parse_response(response).await?;
     Ok(())
