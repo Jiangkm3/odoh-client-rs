@@ -13,7 +13,7 @@ use reqwest::{
 };
 use std::{convert::TryInto, env, fs::File, io::Read};
 use url::Url;
-const NUM_PROXIES: usize = 1;
+const NUM_PROXIES: usize = 3;
 
 const PKG_NAME: &str = env!("CARGO_PKG_NAME");
 const PKG_AUTHORS: &str = env!("CARGO_PKG_AUTHORS");
