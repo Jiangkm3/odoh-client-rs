@@ -17,8 +17,8 @@ use url::Url;
 use std::time::Instant;
 
 const USE_PROXIES: bool = true;
-const NUM_HOPS: usize = 1;
-const NUM_PROXIES: usize = 3;
+// const NUM_HOPS: usize = 1;
+const NUM_PROXIES: usize = 1;
 
 const PKG_NAME: &str = env!("CARGO_PKG_NAME");
 const PKG_AUTHORS: &str = env!("CARGO_PKG_AUTHORS");
@@ -68,7 +68,7 @@ impl ClientSession {
     }
 
     /// Create an oblivious query from a domain and query type
-    pub async fn create_request<const USE_PROXIES: bool>(&mut self, domain: &str, qtype: &str, proxy_names: &Vec<String>, proxy_keys: Vec<&ObliviousDoHConfigContents>) -> Result<(usize, Vec<u8>)> {
+    pub async fn create_request<const USE_PROXIES: bool>(&mut self, domain: &str, qtype: &str, proxy_names: &Vec<String>, proxy_keys: &Vec<&ObliviousDoHConfigContents>, num_hops: usize) -> Result<(usize, Vec<u8>)> {
         // create a DNS message
         let dns_msg = create_dns_query(domain, qtype)?;
         let query = ObliviousDoHMessagePlaintext::new(&dns_msg, 1);
@@ -80,7 +80,7 @@ impl ClientSession {
                 &query, 
                 &self.target.host_str().unwrap().to_string(), 
                 &self.target_config,
-                NUM_HOPS,
+                num_hops,
                 proxy_names,
                 proxy_keys, 
                 &mut rng
@@ -141,7 +141,7 @@ impl ClientSession {
     }
 
     /// Parse the received response from the resolver and print the answer.
-    pub async fn parse_response(&self, resp: Response) -> Result<()> {
+    pub async fn parse_response(&self, resp: Response) -> Result<String> {
         if resp.status() != StatusCode::OK {
             return Err(anyhow!(
                 "query failed with response status code {}",
@@ -149,6 +149,12 @@ impl ClientSession {
             ));
         }
         let mut data = resp.bytes().await?;
+        let parse_timer = if USE_PROXIES {
+            let parse_timer_bytes_len = data.split_to(1)[0] as usize;
+            String::from_utf8(data.split_to(parse_timer_bytes_len).to_vec()).unwrap()
+        } else {
+            "".to_string()
+        };
         let response_body = parse(&mut data).context("failed to parse response body")?;
         let response = decrypt_response(
             &self.query.clone().unwrap(),
@@ -156,8 +162,8 @@ impl ClientSession {
             self.client_secret.clone().unwrap(),
         )
         .context("failed to decrypt response")?;
-        parse_dns_answer(&response.into_msg())?;
-        Ok(())
+        // parse_dns_answer(&response.into_msg())?;
+        Ok(parse_timer)
     }
 }
 
@@ -202,15 +208,25 @@ async fn main() -> Result<()> {
     let qtype = matches.value_of("type").unwrap();
     let mut session = ClientSession::new(config.clone()).await?;
 
-    let init_timer = Instant::now();
-    let (first_proxy, request) = session.create_request::<USE_PROXIES>(domain, qtype, &proxy_names, proxy_keys).await?;
-    let encrypt_timer = init_timer.elapsed();
-    
-    session.proxy = proxy_names[first_proxy].clone();
-    let response = session.send_request::<USE_PROXIES>(&request).await?;
-    session.parse_response(response).await?;
-    let rtt_timer = init_timer.elapsed();
-    
-    println!("ENC: {:.4?}, RTT: {:.4?}", encrypt_timer, rtt_timer);
+    let num_hops = 1;
+    // for num_hops in 1..11 {
+        // println!("\n--\nPOOL = 16, HOP = {}", num_hops);
+        // for _ in 0..5 {
+            let init_timer = Instant::now();
+            let (first_proxy, request) = session.create_request::<USE_PROXIES>(domain, qtype, &proxy_names, &proxy_keys, num_hops).await?;
+            let encrypt_timer = init_timer.elapsed();
+
+            session.proxy = proxy_names[first_proxy].clone();
+            let response = session.send_request::<USE_PROXIES>(&request).await?;
+            let parse_timer = session.parse_response(response).await?;
+            let rtt_timer = init_timer.elapsed();
+            
+            if USE_PROXIES {
+                println!("CPT: {:.4?}, RTT: {:.4?}, TPDT: {}", encrypt_timer, rtt_timer, parse_timer);
+            } else {
+                println!("CPT: {:.4?}, RTT: {:.4?}", encrypt_timer, rtt_timer);
+            }
+        // }
+    // }
     Ok(())
 }
