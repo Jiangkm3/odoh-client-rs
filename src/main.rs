@@ -13,6 +13,11 @@ use reqwest::{
 };
 use std::{convert::TryInto, env, fs::File, io::Read};
 use url::Url;
+
+use std::time::Instant;
+
+const USE_PROXIES: bool = true;
+const NUM_HOPS: usize = 1;
 const NUM_PROXIES: usize = 3;
 
 const PKG_NAME: &str = env!("CARGO_PKG_NAME");
@@ -38,7 +43,7 @@ impl ClientSession {
     pub async fn new(config: Config) -> Result<Self> {
         let mut target = Url::parse(&config.server.target)?;
         target.set_path(QUERY_PATH);
-        let proxy = config.server.proxy.unwrap();
+        let proxy = "".to_string();
 
         // fetch `odohconfigs` by querying well known endpoint using GET request
         let mut odohconfigs = reqwest::get(&format!("{}{}", config.server.target, WELL_KNOWN))
@@ -63,34 +68,49 @@ impl ClientSession {
     }
 
     /// Create an oblivious query from a domain and query type
-    pub async fn create_request(&mut self, domain: &str, qtype: &str, proxy_names: &Vec<String>, proxy_keys: Vec<&ObliviousDoHConfigContents>) -> Result<Vec<u8>> {
+    pub async fn create_request<const USE_PROXIES: bool>(&mut self, domain: &str, qtype: &str, proxy_names: &Vec<String>, proxy_keys: Vec<&ObliviousDoHConfigContents>) -> Result<(usize, Vec<u8>)> {
         // create a DNS message
         let dns_msg = create_dns_query(domain, qtype)?;
         let query = ObliviousDoHMessagePlaintext::new(&dns_msg, 1);
         self.query = Some(query.clone());
         let mut rng = StdRng::from_entropy();
 
-        let (oblivious_query, client_secret) = encrypt_query_with_proxies(
-            &query, 
-            &self.target.host_str().unwrap().to_string(), 
-            &self.target_config,
-            proxy_names,
-            proxy_keys, 
-            &mut rng
-        ).context("failed to encrypt query")?;
-        let query_body = compose(&oblivious_query)
-            .context("failed to compose query body")?
-            .freeze();
+        if USE_PROXIES {
+            let (first_proxy, oblivious_query, client_secret) = encrypt_query_with_proxies(
+                &query, 
+                &self.target.host_str().unwrap().to_string(), 
+                &self.target_config,
+                NUM_HOPS,
+                proxy_names,
+                proxy_keys, 
+                &mut rng
+            ).context("failed to encrypt query")?;
+            let query_body = compose(&oblivious_query)
+                .context("failed to compose query body")?
+                .freeze();
 
-        self.client_secret = Some(client_secret);
-        Ok(query_body.to_vec())
+            self.client_secret = Some(client_secret);
+            Ok((first_proxy, query_body.to_vec()))
+        } else {
+            let (oblivious_query, client_secret) = encrypt_query(
+                &query, 
+                &self.target_config,
+                &mut rng
+            ).context("failed to encrypt query")?;
+            let query_body = compose(&oblivious_query)
+                .context("failed to compose query body")?
+                .freeze();
+    
+            self.client_secret = Some(client_secret);
+            Ok((0, query_body.to_vec()))
+        }
     }
 
     /// Set headers and build an HTTP request to send the oblivious query to the proxy/target.
     /// If a proxy is specified, the request will be sent to the proxy. However, if a proxy is absent,
     /// it will be sent directly to the target. Note that not specifying a proxy effectively nullifies
     /// the entire purpose of using ODoH.
-    pub async fn send_request(
+    pub async fn send_request<const USE_PROXIES: bool>(
         &mut self, 
         request: &[u8],
     ) -> Result<Response> {
@@ -108,12 +128,13 @@ impl ClientSession {
             .proxy(proxy)
             .danger_accept_invalid_certs(true)
             .build()?;
-        // Set target to a blind website
-        let mut blind = Url::parse("https://www.google.com")?;
-        blind.set_path(QUERY_PATH);
-
-        let builder = {
+        let builder = if USE_PROXIES {
+            // Set target to a blind website
+            let mut blind = Url::parse("https://www.google.com")?;
+            blind.set_path(QUERY_PATH);
             self.client.post(blind.clone()).headers(headers)
+        } else {
+            self.client.post(self.target.clone()).headers(headers)
         };
         let resp = builder.body(request.to_vec()).send().await?;
         Ok(resp)
@@ -176,13 +197,20 @@ async fn main() -> Result<()> {
     let config_file = matches
         .value_of("config_file")
         .unwrap_or("tests/config.toml");
-    let mut config = Config::from_path(config_file)?;
-    config.server.proxy = Some(proxy_names[proxy_names.len() - 1].clone());
+    let config = Config::from_path(config_file)?;
     let domain = matches.value_of("domain").unwrap();
     let qtype = matches.value_of("type").unwrap();
     let mut session = ClientSession::new(config.clone()).await?;
-    let request = session.create_request(domain, qtype, &proxy_names, proxy_keys).await?;
-    let response = session.send_request(&request).await?;
+
+    let init_timer = Instant::now();
+    let (first_proxy, request) = session.create_request::<USE_PROXIES>(domain, qtype, &proxy_names, proxy_keys).await?;
+    let encrypt_timer = init_timer.elapsed();
+    
+    session.proxy = proxy_names[first_proxy].clone();
+    let response = session.send_request::<USE_PROXIES>(&request).await?;
     session.parse_response(response).await?;
+    let rtt_timer = init_timer.elapsed();
+    
+    println!("ENC: {:.4?}, RTT: {:.4?}", encrypt_timer, rtt_timer);
     Ok(())
 }
