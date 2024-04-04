@@ -18,7 +18,7 @@ use std::time::Instant;
 
 const USE_PROXIES: bool = true;
 // const NUM_HOPS: usize = 1;
-const NUM_PROXIES: usize = 1;
+const NUM_PROXIES: usize = 16;
 
 const PKG_NAME: &str = env!("CARGO_PKG_NAME");
 const PKG_AUTHORS: &str = env!("CARGO_PKG_AUTHORS");
@@ -99,10 +99,10 @@ impl ClientSession {
             ).context("failed to encrypt query")?;
             let query_body = compose(&oblivious_query)
                 .context("failed to compose query body")?
-                .freeze();
+                .freeze().to_vec();
     
             self.client_secret = Some(client_secret);
-            Ok((0, query_body.to_vec()))
+            Ok((0, [vec![num_hops.try_into().unwrap()], query_body].concat()))
         }
     }
 
@@ -209,9 +209,9 @@ async fn main() -> Result<()> {
     let mut session = ClientSession::new(config.clone()).await?;
 
     let num_hops = 1;
-    // for num_hops in 1..11 {
-        // println!("\n--\nPOOL = 16, HOP = {}", num_hops);
-        // for _ in 0..5 {
+    for num_hops in 1..11 {
+        println!("\n--\nPOOL = 16, HOP = {}", num_hops);
+        for _ in 0..5 {
             let init_timer = Instant::now();
             let (first_proxy, request) = session.create_request::<USE_PROXIES>(domain, qtype, &proxy_names, &proxy_keys, num_hops).await?;
             let encrypt_timer = init_timer.elapsed();
@@ -226,7 +226,7 @@ async fn main() -> Result<()> {
             } else {
                 println!("CPT: {:.4?}, RTT: {:.4?}", encrypt_timer, rtt_timer);
             }
-        // }
-    // }
+        }
+    }
     Ok(())
 }

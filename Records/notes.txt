@@ -1,0 +1,19 @@
+All tests are performed 5 times
+Terms:
+  CPT - client preprocessing (encryption) time
+  TPDT - TOTAL proxy decryption time (for all proxies on the path)
+  RTT - round-trip communication time
+
+Point of Delay:
+1. Communication time (delay)
+2. Receival time (message length)
+3. Decryption time
+
+!!!!NOTE THE DIFFERENCE IN TIME UNIT!!!!
+
+BASELINE 1: Direct Communication, no Proxy
+BASELINE 2: One proxy, no additional encryption
+BASELINE 3: Multiple proxy, no additional encryption
+PODOH
+
+Note: BASELINE 2 is the same as the first entry in BASELINE 3
