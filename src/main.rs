@@ -27,7 +27,7 @@ const WELL_KNOWN: &str = "/.well-known/odohconfigs";
 struct ClientSession {
     pub client: Client,
     pub target: Url,
-    pub proxy: Option<Url>,
+    pub proxy: String,
     pub client_secret: Option<[u8; 16]>,
     pub target_config: ObliviousDoHConfigContents,
     pub query: Option<ObliviousDoHMessagePlaintext>,
@@ -38,11 +38,7 @@ impl ClientSession {
     pub async fn new(config: Config) -> Result<Self> {
         let mut target = Url::parse(&config.server.target)?;
         target.set_path(QUERY_PATH);
-        let proxy = if let Some(p) = &config.server.proxy {
-            Url::parse(p).ok()
-        } else {
-            None
-        };
+        let proxy = config.server.proxy.unwrap();
 
         // fetch `odohconfigs` by querying well known endpoint using GET request
         let mut odohconfigs = reqwest::get(&format!("{}{}", config.server.target, WELL_KNOWN))
@@ -67,18 +63,25 @@ impl ClientSession {
     }
 
     /// Create an oblivious query from a domain and query type
-    pub fn create_request(&mut self, domain: &str, qtype: &str, pk_list: Vec<&ObliviousDoHConfigContents>) -> Result<Vec<u8>> {
+    pub async fn create_request(&mut self, domain: &str, qtype: &str, proxy_names: &Vec<String>, proxy_keys: Vec<&ObliviousDoHConfigContents>) -> Result<Vec<u8>> {
         // create a DNS message
         let dns_msg = create_dns_query(domain, qtype)?;
         let query = ObliviousDoHMessagePlaintext::new(&dns_msg, 1);
         self.query = Some(query.clone());
         let mut rng = StdRng::from_entropy();
-        let (oblivious_query, client_secret) = encrypt_query(&query, &self.target_config, pk_list, &mut rng)
-            .context("failed to encrypt query")?;
 
+        let (oblivious_query, client_secret) = encrypt_query_with_proxies(
+            &query, 
+            &self.target.host_str().unwrap().to_string(), 
+            &self.target_config,
+            proxy_names,
+            proxy_keys, 
+            &mut rng
+        ).context("failed to encrypt query")?;
         let query_body = compose(&oblivious_query)
             .context("failed to compose query body")?
             .freeze();
+
         self.client_secret = Some(client_secret);
         Ok(query_body.to_vec())
     }
@@ -87,21 +90,16 @@ impl ClientSession {
     /// If a proxy is specified, the request will be sent to the proxy. However, if a proxy is absent,
     /// it will be sent directly to the target. Note that not specifying a proxy effectively nullifies
     /// the entire purpose of using ODoH.
-    pub async fn send_request(&mut self, request: &[u8]) -> Result<Response> {
+    pub async fn send_request(
+        &mut self, 
+        request: &[u8],
+    ) -> Result<Response> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, ODOH_HTTP_HEADER.parse()?);
         headers.insert(ACCEPT, ODOH_HTTP_HEADER.parse()?);
         headers.insert(CACHE_CONTROL, "no-cache, no-store".parse()?);
-        let _query = [
-            (
-                "targethost",
-                self.target
-                    .host_str()
-                    .context("Target host is not a valid host string")?,
-            ),
-            ("targetpath", QUERY_PATH),
-        ];
-        let proxy = reqwest::Proxy::https("http://localhost:8080")?;
+
+        let proxy = reqwest::Proxy::https(&self.proxy)?;
         let mut buf = Vec::new();
         File::open("../third-wheel/ca/ca_certs/cert.pem")?.read_to_end(&mut buf)?;
         let cert = reqwest::Certificate::from_pem(&buf)?;
@@ -110,10 +108,13 @@ impl ClientSession {
             .proxy(proxy)
             .danger_accept_invalid_certs(true)
             .build()?;
+        // Set target to a blind website
+        let mut blind = Url::parse("https://www.google.com")?;
+        blind.set_path(QUERY_PATH);
+
         let builder = {
-            self.client.post(self.target.clone()).headers(headers)
+            self.client.post(blind.clone()).headers(headers)
         };
-        println!("R: {:?}", request);
         let resp = builder.body(request.to_vec()).send().await?;
         Ok(resp)
     }
@@ -141,9 +142,10 @@ impl ClientSession {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let proxy_names: Vec<String> = (0..NUM_PROXIES).map(|i| format!("http://localhost:{}", 8080 + i)).collect();
     let mut rng_list: Vec<StdRng> = (0..NUM_PROXIES).map(|i| StdRng::seed_from_u64(i.try_into().unwrap())).collect();
     let keypair_list: Vec<ObliviousDoHKeyPair> = rng_list.iter_mut().map(|r| ObliviousDoHKeyPair::new(r)).collect();
-    let pk_list: Vec<&ObliviousDoHConfigContents> = keypair_list.iter().map(|i| i.public()).collect();
+    let proxy_keys: Vec<&ObliviousDoHConfigContents> = keypair_list.iter().map(|i| i.public()).collect();
 
     let matches = App::new(PKG_NAME)
         .version(PKG_VERSION)
@@ -174,11 +176,12 @@ async fn main() -> Result<()> {
     let config_file = matches
         .value_of("config_file")
         .unwrap_or("tests/config.toml");
-    let config = Config::from_path(config_file)?;
+    let mut config = Config::from_path(config_file)?;
+    config.server.proxy = Some(proxy_names[proxy_names.len() - 1].clone());
     let domain = matches.value_of("domain").unwrap();
     let qtype = matches.value_of("type").unwrap();
     let mut session = ClientSession::new(config.clone()).await?;
-    let request = session.create_request(domain, qtype, pk_list)?;
+    let request = session.create_request(domain, qtype, &proxy_names, proxy_keys).await?;
     let response = session.send_request(&request).await?;
     session.parse_response(response).await?;
     Ok(())
